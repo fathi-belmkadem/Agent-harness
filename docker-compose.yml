@@ -1,0 +1,93 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      # Published so a local (non-container) `harness` run can also reach
+      # this same Redis via REDIS_URL=redis://localhost:6379/0.
+      - "6379:6379"
+
+  brave-search:
+    image: node:22-alpine
+    command: ["npx", "-y", "@brave/brave-search-mcp-server", "--transport", "http", "--host", "0.0.0.0"]
+    environment:
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/ping').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  agent-harness:
+    # Fixed name so Prometheus can scrape it as `agent-harness:9100`. This
+    # covers `docker compose up`; `docker compose run` ignores it and picks
+    # a random name, so pass `--name agent-harness` to `run` (see README).
+    # One harness container at a time either way.
+    container_name: agent-harness
+    build: .
+    # The REPL runs under `up` too: `docker compose up -d` starts it waiting
+    # for input, and `docker compose attach agent-harness` connects your
+    # terminal to it (Ctrl-P Ctrl-Q detaches, `exit` stops the container).
+    stdin_open: true # keep stdin open for the interactive REPL
+    tty: true
+    # Prometheus and Grafana are dependencies so that `docker compose run
+    # agent-harness` brings the whole stack up, including after a `down`.
+    # Without this, `run` starts only Redis and the dashboard stays dark.
+    depends_on:
+      redis:
+        condition: service_started
+      brave-search:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+      grafana:
+        condition: service_started
+    environment:
+      AGENT_ACCESS_TOKEN_FILE: /run/secrets/agent_access_token
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+    secrets:
+      - agent_access_token
+    ports:
+      - "9100:9100"
+    volumes:
+      - ./workspace:/app/workspace
+      - ./.transcripts:/app/.transcripts
+      - ./.memory:/app/.memory
+
+  # Observability. Prometheus scrapes the harness container by its fixed
+  # name (`agent-harness:9100`) every 5s; Grafana is provisioned with the
+  # datasource and the dashboard, no login needed. Metrics live in the
+  # harness process, so keep the REPL open if you want to watch them move.
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    depends_on:
+      - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+
+secrets:
+  agent_access_token:
+    file: ./.secrets/agent_access_token.txt
+
+volumes:
+  redis-data:
+  prometheus-data:

@@ -1,0 +1,41 @@
+# Build context is ./agent-harness (see docker-compose.yml), so every pattern
+# here is relative to that directory — not to the repo root.
+#
+# This file previously contained unresolved merge conflict markers. Docker
+# read them as literal patterns, so both sides were applied by accident. This
+# is the deliberate union of the two.
+
+# Local environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime data. None of it belongs in an image, and .memory/ in particular
+# grows without bound — it is the SQLite fact store, with vectors.
+workspace/
+.transcripts/
+.memory/
+
+# Not copied by the Dockerfile; excluded so they don't bloat the context
+tests/
+docs/
+observability/
+docker-compose.yml
+Dockerfile
+README.md
+
+# Secrets, by name and by shape. The token is delivered as a mounted Docker
+# secret at runtime, never baked into a layer.
+.secrets/
+.env
+*.env
+*.key
+*.pem
+*.token
+*credentials*
+*secret*
+
+# Version control
+.git/
+.gitignore

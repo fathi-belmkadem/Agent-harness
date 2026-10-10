@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+
+# Runtime data (bind-mounted into the container)
+workspace/
+.transcripts/
+.memory/
+
+# Secrets: never commit these
+.env
+.secrets/
+*.token
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

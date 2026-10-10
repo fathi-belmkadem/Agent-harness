@@ -1,0 +1,155 @@
+llm:
+  # Any OpenAI-compatible endpoint (/chat/completions, /embeddings).
+  # LLM_BASE_URL in the environment overrides this.
+  base_url: "https://llms.innkube.fim.uni-passau.de"
+  model: "qwen3-next-80b-a3b-instruct"
+  temperature: 0.0
+  max_iterations: 15
+
+session:
+  # Short-term memory: the running conversation, persisted in Redis so it
+  # survives restarts. If Redis is unreachable, the harness still starts with
+  # a fresh, non-persistent conversation instead of failing.
+  enabled: true
+  # "redis" resolves via Docker/compose's internal DNS to the redis service
+  # below; REDIS_URL in the environment overrides this (used for local,
+  # non-container runs, where it should point at "redis://localhost:6379/0").
+  url: "redis://redis:6379/0"
+  session_id: "default"
+  # Token budget for the conversation sent to the model. A message count says
+  # nothing about context pressure — one message carrying a pasted file
+  # outweighs forty short ones — so this is what actually governs compaction.
+  context_budget_tokens: 24000
+
+compaction:
+  # The opening messages and a token-budgeted tail stay verbatim; only the
+  # middle is compacted, and user messages are never touched.
+  protect_head_messages: 2
+  tail_token_budget: 6000
+
+memory:
+  # Long-term memory: explicit memory__remember / memory__search tools,
+  # plus automatic recall prefixed onto a copy of each user message.
+  enabled: true
+  path: ".memory/memory.sqlite3"
+  retrieval_limit: 5
+  max_entry_length: 2000
+  # Semantic recall through the same endpoint as the chat model. Hybrid:
+  # keyword search still runs first and wins on exact identifiers; embeddings
+  # catch the same idea worded differently. Falls back to keyword-only if the
+  # endpoint is unavailable.
+  embeddings:
+    enabled: true
+    model: "octen-embedding-8b"
+    # Cosine floor for a semantic hit. Measured on this project's own stored
+    # facts: irrelevant queries topped out at 0.21, correct matches ran
+    # 0.32-0.53. Raise it if recall gets noisy, lower it if facts go missing.
+    min_similarity: 0.30
+  # Episodic memory: a searchable archive of past conversations, in the same
+  # SQLite file. Written after every turn, read only through session__search.
+  # Answers "what did we decide last time" without anyone storing it as a fact.
+  episodic:
+    enabled: true
+    max_message_length: 4000
+  # Background maintenance so the store stays usable instead of only growing:
+  # once every_n_turns archived turns are unsummarized, a model extracts
+  # facts from up to max_turns_per_pass of them, then facts nobody has
+  # stored or recalled in archive_after_days are archived. Nothing is ever
+  # deleted, and pinned entries are exempt.
+  consolidation:
+    enabled: true
+    every_n_turns: 5
+    max_turns_per_pass: 20
+    model: "qwen3-next-80b-a3b-instruct"
+    archive_after_days: 45
+
+mcp:
+  servers:
+    - name: everything
+      transport: stdio
+      # A thin wrapper around the reference server-everything: proxies its
+      # tools unchanged and adds `get_time`. See harness/mcp_servers/everything_ext.
+      command: ["python", "-m", "harness.mcp_servers.everything_ext"]
+      timeout_s: 60
+    - name: brave-search
+      transport: http
+      url: "http://brave-search:8080/mcp"
+      timeout_s: 60
+      # The brave-search Compose service reads this key from the root .env;
+      # never put it in this file. Without it, this optional server is skipped
+      # at harness boot instead, with a status line.
+      requires_env: [BRAVE_API_KEY]
+
+# Permission policies use the same allow/deny/ask Policy model at two
+# lifecycle boundaries. Server permission is checked before an MCP transport
+# is created; tool permission is checked before every tool call. With no
+# terminal (--prompt, compose -T), `ask` resolves to deny.
+permissions:
+  servers:
+    default: deny
+    rules:
+      - match: "everything"
+        decision: allow
+      - match: "brave-search"
+        decision: ask
+  tools:
+    default: allow
+    rules:
+      - match: "memory__forget"
+        decision: ask
+
+# Sub-agents the parent can delegate to. Each is the same loop with its own
+# prompt, a tool subset (globs over registered tool names, MCP included), its
+# own iteration cap and its own permission policy. A child sees only the task
+# it is given -- never the parent's conversation -- and reads long-term facts
+# but cannot write them. Depth is one: a child cannot delegate.
+subagents:
+  - name: researcher
+    description: >-
+      Researches one question using web search and long-term memory and returns a
+      concise, sourced bullet list. Cannot touch the filesystem.
+    system_prompt: |
+      You are a research sub-agent. Answer the one question you are given by
+      searching, then reply with a concise bullet list of findings, each with
+      its source URL. Do not write files. Do not speculate; if you could not
+      find something, say so in one line.
+    tools: ["brave-search__*", "everything__*", "memory__search", "session__search"]
+    max_iterations: 8
+  - name: writer
+    description: >-
+      Writes given content to a workspace file, optionally exporting it as PDF,
+      and reports the path. Cannot search the web.
+    system_prompt: |
+      You are a writing sub-agent. Write exactly the content you are given to
+      the path you are given, creating folders as needed. If asked, export it
+      as PDF too. Reply with the path(s) you wrote and nothing else.
+    tools: ["write_file", "create_folder", "read_file", "append_file", "export_pdf"]
+    max_iterations: 6
+    permissions:
+      rules:
+        - match: "export_pdf"
+          decision: ask
+
+# Skills: written procedures under skills/<category>/<name>/SKILL.md. Their
+# names and descriptions go into the system prompt once at startup; the model
+# reads a body on demand with skill__read. Relative to this file.
+skills:
+  path: skills
+
+# How delegate__* calls in one model response are run. 1 runs them in
+# order. Above 1, independent delegations run concurrently (threads; each
+# child is its own loop with its own budget) and children cannot prompt:
+# their `ask` resolves to deny. Start at 2 if the proxy rate-limits.
+delegation:
+  max_parallel: 1
+
+# Prometheus endpoint. Metrics are counted from the same trace events the
+# transcript records, so nothing in the loop knows they exist. Scraped by the
+# prometheus service in docker-compose; Grafana reads from there.
+observability:
+  metrics_port: 9100
+
+sandbox:
+  root: "workspace"
+# NOTE: access_token is intentionally not a key here.
+# Set it via: export AGENT_ACCESS_TOKEN=...

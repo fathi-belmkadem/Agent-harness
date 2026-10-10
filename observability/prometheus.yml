@@ -1,0 +1,16 @@
+# Scrapes the harness by its fixed container name (`container_name:
+# agent-harness` in docker-compose.yml), so `docker compose run` and
+# `docker compose up` resolve the same target. Port 9100 is
+# observability.metrics_port in agent-harness/config.yaml, served by
+# prometheus_client.start_http_server. 5s so the dashboard moves during
+# a live demo.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: agent-harness
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["agent-harness:9100"]
+        labels:
+          container: agent-harness
